@@ -5,13 +5,15 @@ import re
 import subprocess
 import sys
 import time
-from playwright.sync_api import Error as PlaywrightError
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from dotenv import load_dotenv
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import (
+    Error as PlaywrightError,
+    sync_playwright,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -83,7 +85,7 @@ def parse_date(value: str) -> str:
 
 
 def parse_decimal(value: str) -> float:
-    """Konversi format Indonesia, misalnya 16.500,25 menjadi 16500.25."""
+    """Konversi format Indonesia: 16.500,25 menjadi 16500.25."""
     value = re.sub(r"\s+", "", str(value))
     value = value.replace("Rp", "")
     value = value.replace(".", "").replace(",", ".")
@@ -96,10 +98,10 @@ def parse_decimal(value: str) -> float:
 
         return float(number)
 
-    except InvalidOperation as error:
+    except InvalidOperation as exc:
         raise ValueError(
             f"Angka kurs tidak valid: {value}"
-        ) from error
+        ) from exc
 
 
 def extract_source_date(page) -> str:
@@ -108,7 +110,6 @@ def extract_source_date(page) -> str:
     patterns = [
         r"Update\s+Terakhir\s*:?\s*"
         r"(\d{1,2}\s+[A-Za-z]+\s+\d{4})",
-
         r"(?:Tanggal|Kurs\s+Tanggal)\s*:?\s*"
         r"(\d{1,2}\s+[A-Za-z]+\s+\d{4})",
     ]
@@ -158,20 +159,51 @@ def ensure_chromium(playwright):
         ).strip()
 
         raise RuntimeError(
-            f"Instalasi Chromium Playwright gagal:\n{detail[-3000:]}"
+            f"Instalasi Chromium gagal:\n{detail[-3000:]}"
         )
 
     if not executable.is_file():
         raise RuntimeError(
-            "Instalasi selesai, tetapi executable Chromium "
-            f"belum ditemukan di: {executable}"
+            "Executable Chromium belum ditemukan di: "
+            f"{executable}"
         )
 
 
+def open_bi_page(page, timeout_ms: int):
+    """Coba kembali maksimal 3 kali jika koneksi di-reset."""
+    for attempt in range(3):
+        try:
+            response = page.goto(
+                BI_URL,
+                wait_until="domcontentloaded",
+                timeout=timeout_ms,
+            )
+
+            if response is not None and response.status >= 400:
+                raise RuntimeError(
+                    f"Halaman BI mengembalikan HTTP {response.status}."
+                )
+
+            return
+
+        except PlaywrightError as exc:
+            if "ERR_CONNECTION_RESET" not in str(exc):
+                raise
+
+            if attempt == 2:
+                raise RuntimeError(
+                    "Koneksi dari server aplikasi ke BI diputus "
+                    "setelah 3 percobaan (ERR_CONNECTION_RESET). "
+                    "Retry tidak berhasil memulihkan koneksi."
+                ) from exc
+
+            time.sleep(3)
+
+
 def scrape_kurs(
-    headless: bool = False,
+    headless: bool = True,
 ) -> tuple[str, list[dict]]:
-    """Ambil snapshot tabel yang ditampilkan, bukan histori otomatis."""
+    """Ambil snapshot tabel saat ini, bukan histori otomatis."""
     timeout_ms = int(
         os.getenv("SCRAPE_TIMEOUT_MS", "60000")
     )
@@ -179,6 +211,8 @@ def scrape_kurs(
     with sync_playwright() as p:
         ensure_chromium(p)
 
+        # Selalu headless agar dapat berjalan di Streamlit Cloud.
+        # Parameter fungsi tetap tersedia agar kompatibel dengan worker.
         browser = p.chromium.launch(
             headless=True,
             timeout=timeout_ms,
@@ -195,26 +229,7 @@ def scrape_kurs(
 
             page.set_default_timeout(timeout_ms)
 
-            for attempt in range(3):
-    try:
-        page.goto(
-            BI_URL,
-            wait_until="domcontentloaded",
-            timeout=timeout_ms,
-        )
-        break
-
-    except PlaywrightError as exc:
-        if "ERR_CONNECTION_RESET" not in str(exc):
-            raise
-
-        if attempt == 2:
-            raise RuntimeError(
-                "Koneksi dari server Streamlit Cloud ke BI "
-                "diputus setelah 3 percobaan."
-            ) from exc
-
-        time.sleep(3)
+            open_bi_page(page, timeout_ms)
 
             page.get_by_text(
                 "USD",
@@ -265,10 +280,7 @@ def scrape_kurs(
 
                     currency = values[0].upper()
 
-                    if not re.fullmatch(
-                        r"[A-Z]{3}",
-                        currency,
-                    ):
+                    if not re.fullmatch(r"[A-Z]{3}", currency):
                         continue
 
                     try:
@@ -299,6 +311,7 @@ def scrape_kurs(
 
             if not records:
                 diagnostic = BASE_DIR / "data" / "debug_bi.html"
+
                 diagnostic.parent.mkdir(
                     parents=True,
                     exist_ok=True,
