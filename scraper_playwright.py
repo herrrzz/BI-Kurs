@@ -178,7 +178,7 @@ def scrape_kurs(
         ensure_chromium(p)
 
         browser = p.chromium.launch(
-            headless=headless,
+            headless=True,
             timeout=timeout_ms,
         )
 
