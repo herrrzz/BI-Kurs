@@ -4,6 +4,8 @@ import os
 import re
 import subprocess
 import sys
+import time
+from playwright.sync_api import Error as PlaywrightError
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -193,11 +195,26 @@ def scrape_kurs(
 
             page.set_default_timeout(timeout_ms)
 
-            page.goto(
-                BI_URL,
-                wait_until="domcontentloaded",
-                timeout=timeout_ms,
-            )
+            for attempt in range(3):
+    try:
+        page.goto(
+            BI_URL,
+            wait_until="domcontentloaded",
+            timeout=timeout_ms,
+        )
+        break
+
+    except PlaywrightError as exc:
+        if "ERR_CONNECTION_RESET" not in str(exc):
+            raise
+
+        if attempt == 2:
+            raise RuntimeError(
+                "Koneksi dari server Streamlit Cloud ke BI "
+                "diputus setelah 3 percobaan."
+            ) from exc
+
+        time.sleep(3)
 
             page.get_by_text(
                 "USD",
