@@ -214,7 +214,7 @@ def scrape_kurs(
         # Selalu headless agar dapat berjalan di Streamlit Cloud.
         # Parameter fungsi tetap tersedia agar kompatibel dengan worker.
         browser = p.chromium.launch(
-            headless=True,
+            headless=headless,
             timeout=timeout_ms,
         )
 
